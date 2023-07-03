@@ -22,6 +22,7 @@ from copy import deepcopy
 from glob import glob
 import os
 import pickle
+from more_itertools import chunked
 
 from multiprocessing import Pool
 import hashlib
@@ -157,16 +158,26 @@ def _run_templates_rdchiral_original(prod_appl):
             
     return results
 
-def run_templates(test_product_smarts, templates, appl, njobs=32, cache_dir='/tmp'):
+def run_templates(test_product_smarts, templates, appl, njobs=32, cache_dir='/tmp', chunksize=None):
     appl_dict = defaultdict(list)
     for i,j in zip(*appl):
         appl_dict[i].append(j)
-    
-    prod_appl_list = []       
+
+    prod_idxs = []
+    prod_appl_list = []
     for prod_idx, prod in enumerate(test_product_smarts):
         applicable_templates = [(idx, templates[idx]) for idx in appl_dict[prod_idx]]
-        prod_appl_list.append((prod, applicable_templates))
-    
+        chunks = (
+            chunked(applicable_templates, chunksize)
+            if chunksize is not None
+            else [applicable_templates]
+        )
+
+        for chunk in chunks:
+            prod_idxs.append(prod_idx)
+            prod_appl_list.append((prod, chunk))
+
+
     arg_hash = hashlib.md5(pickle.dumps(prod_appl_list)).hexdigest()
     cache_file = os.path.join(cache_dir, arg_hash+'.p')
     
@@ -174,27 +185,18 @@ def run_templates(test_product_smarts, templates, appl, njobs=32, cache_dir='/tm
         with open(cache_file, 'rb') as f:
             print('loading results from file',f)
             all_results = pickle.load(f)
-            
-    #find /tmp -type f \( ! -user root \) -atime +3 -delete
-    # to delete the tmp files that havent been accessed 3 days
-
     else:    
-        #with Pool(njobs) as pool:
-        #    all_results = pool.map(_run_templates_rdchiral, prod_appl_list)
-        
         from tqdm.contrib.concurrent import process_map
         all_results = process_map(_run_templates_rdchiral, prod_appl_list, max_workers=njobs, chunksize=1, mininterval=2)
-        
-        #with open(cache_file, 'wb') as f:
-        #    print('saving applicable_templates to cache', cache_file)
-        #    pickle.dump(all_results, f)
-            
 
-        
+    all_results_by_product = [{} for _ in range(len(test_product_smarts))]
+    for prod_idx, results in zip(prod_idxs, all_results):
+        all_results_by_product[prod_idx].update(results)
+
     prod_idx_reactants = []
     prod_temp_reactants = []
 
-    for prod, idx_temp_reactants in zip(test_product_smarts, all_results):
+    for prod, idx_temp_reactants in zip(test_product_smarts, all_results_by_product):
         prod_idx_reactants.append({idx_temp[0]: r for idx_temp, r  in idx_temp_reactants.items()})
         prod_temp_reactants.append({idx_temp[1]: r for idx_temp, r  in idx_temp_reactants.items()})
     
